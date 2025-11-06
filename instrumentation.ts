@@ -4,6 +4,7 @@ import { OpenAIInstrumentation } from "@arizeai/openinference-instrumentation-op
 
 const provider = register({
   projectName: "openai-app",
+  instrumentations: [new OpenAIInstrumentation()],
 });
 
 const instrumentation = new OpenAIInstrumentation();
