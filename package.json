@@ -1,0 +1,25 @@
+{
+  "name": "phoenix-ts-app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "experiment": "npx ts-node experiment.ts",
+    "eval":"npx ts-node evaluation.ts",
+    "all": "npx ts-node main.ts && npx ts-node experiment.ts && npx ts-node evaluation.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC", 
+  "description": "",
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@arizeai/openinference-instrumentation-openai": "^3.2.5",
+    "@arizeai/phoenix-otel": "^0.3.0",
+    "openai": "^6.8.1"
+  }
+}
