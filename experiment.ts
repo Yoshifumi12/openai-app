@@ -1,71 +1,66 @@
-import "./instrumentation.ts";
+import { createClient } from "@arizeai/phoenix-client";
+import {
+  asEvaluator,
+  runExperiment,
+} from "@arizeai/phoenix-client/experiments";
+import type { Example } from "@arizeai/phoenix-client/types/datasets";
 import OpenAI from "openai";
-import { trace } from "@opentelemetry/api";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const phoenix = createClient();
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const task = async (example: Example) => {
+  const response = await openai.chat.completions.create({
+    model: (example.metadata?.model as string) || "gpt-4o",
+    messages: [
+      { role: "user", content: JSON.stringify(example.input, null, 2) },
+    ],
+    temperature: 0.7,
+  });
+  return response.choices[0]?.message?.content ?? "";
+};
+
+const haikuStructure = asEvaluator({
+  name: "Haiku Structure",
+  kind: "LLM",
+  evaluate: async ({ output }) => {
+    const lines = (output as string)?.trim().split("\n").filter(Boolean);
+    const syllables = (word: string) =>
+      Math.max(
+        1,
+        word
+          .toLowerCase()
+          .split(/[aeiouy]+/)
+          .filter(Boolean).length
+      );
+
+    const lineSyllables = lines.map((line) =>
+      line.split(/\s+/).reduce((sum, w) => sum + syllables(w), 0)
+    );
+
+    const isValid =
+      lines.length === 3 &&
+      lineSyllables[0] === 5 &&
+      lineSyllables[1] === 7 &&
+      lineSyllables[2] === 5;
+
+    return {
+      score: isValid ? 1.0 : 0.0,
+      label: isValid ? "valid" : "invalid",
+      explanation: `Syllables: ${lineSyllables.join("-")} (expected 5-7-5)`,
+      metadata: { line_count: lines.length },
+    };
+  },
 });
 
-async function runExperiment(
-  model: string, 
-  prompt: string, 
-  experimentName: string,
-  variant: string
-) {
-  const tracer = trace.getTracer("openai-app");
-  
-  return tracer.startActiveSpan(`experiment.${experimentName}`, async (span) => {
-    try {
-      span.setAttribute("phoenix.experiment.name", experimentName);
-      span.setAttribute("phoenix.experiment.variant", variant);
-      span.setAttribute("phoenix.dataset.name", experimentName);
-      
-      const response = await openai.chat.completions.create({
-        model: model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-      });
-      
-      const content = response.choices[0].message.content;
-      
-      span.setAttribute("llm.model_name", model);
-      span.setAttribute("llm.prompt", prompt);
-      span.setAttribute("llm.output_messages", JSON.stringify([{
-        role: "assistant",
-        content: content
-      }]));
-      
-      return {
-        variant,
-        model,
-        content,
-        prompt,
-        usage: response.usage
-      };
-    } finally {
-      span.end();
-    }
+runExperiment({
+  dataset: {
+    datasetId: "RGF0YXNldDox", 
+  },
+  experimentName: "gpt-4o-vs-gpt-3.5-turbo",
+  client: phoenix,
+  task,
+  evaluators: [haikuStructure],
   });
-}
 
-const experimentPrompts = [
-  "Write a creative haiku about the ocean",
-  "Write a technical haiku about programming",
-  "Write an emotional haiku about friendship"
-];
-
-Promise.all(
-  experimentPrompts.flatMap(prompt => [
-    runExperiment("gpt-4o", prompt, "model-comparison", "gpt-4o"),
-    runExperiment("gpt-3.5-turbo", prompt, "model-comparison", "gpt-3.5-turbo")
-  ])
-).then(results => {
-  console.log("Experiment Results:");
-  results.forEach(result => {
-    console.log(`Variant: ${result.variant}`);
-    console.log(`Prompt: ${result.prompt}`);
-    console.log(`Response: ${result.content}`);
-    console.log(`Tokens: ${result.usage?.total_tokens}`);
-    console.log("---");
-  });
-}).then(() => new Promise(resolve => setTimeout(resolve, 10000)));
+new Promise((r) => setTimeout(r, 15000));

@@ -1,65 +1,87 @@
 import "./instrumentation.ts";
 import OpenAI from "openai";
-import { trace } from "@opentelemetry/api";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { createClient } from "@arizeai/phoenix-client";
+import { addSpanAnnotation } from "@arizeai/phoenix-client/spans";
+import type { Annotation } from "@arizeai/phoenix-client/types/annotations";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const phoenix = createClient();
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 class EvalAnnotator {
   private tracer = trace.getTracer("openai-app");
+  private useApiAnnotations = true;
 
-  async generateWithAutomaticEvals(theme: string, prompt: string) {
-    return this.tracer.startActiveSpan("llm.generation", async (span) => {
-      try {
-        span.setAttribute("phoenix.dataset.name", "comprehensive-evals");
-        span.setAttribute("theme", theme);
-
-        const response = await openai.chat.completions.create({
-          model: "gpt-4o",
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.7,
-        });
-
-        const content = response.choices[0].message.content;
-
-        if (!content) {
-          return;
-        }
-
-        span.setAttribute(
-          "llm.output_messages",
-          JSON.stringify([
-            {
-              role: "assistant",
-              content: content,
-            },
-          ])
-        );
-
-        const autoEvals = await this.runAutomaticEvals(content, theme);
-        this.addAnnotationsToSpan(span, autoEvals);
-
-        return {
-          content,
-          spanContext: span.spanContext(),
-          autoEvals,
-        };
-      } finally {
-        span.end();
-      }
+  async generateAndEvaluate(theme: string, prompt: string) {
+    const span = this.tracer.startSpan("llm.generation", {
+      kind: 1,
+      attributes: {
+        "phoenix.dataset.name": "comprehensive-evals",
+        theme: theme,
+        "openinference.span.kind": "LLM",
+      },
     });
+
+    let content: string;
+    const spanId = span.spanContext().spanId.toString();
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7,
+      });
+
+      content = response.choices[0].message.content || "";
+      if (!content) throw new Error("Empty response");
+
+      span.setAttribute(
+        "llm.input_messages",
+        JSON.stringify([{ role: "user", content: prompt }])
+      );
+      span.setAttribute(
+        "llm.output_messages",
+        JSON.stringify([{ role: "assistant", content }])
+      );
+
+      span.setStatus({ code: SpanStatusCode.OK });
+    } catch (err: any) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      span.recordException(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+
+    const autoEvals = await this.runAutomaticEvals(content, theme);
+    await this.addAnnotations(spanId, span, autoEvals, "model");
+
+    const humanEvals = [
+      {
+        name: "human_quality_score",
+        score: 0.85,
+        explanation: "Good overall quality",
+        evaluator: "human",
+      },
+      {
+        name: "human_approval",
+        label: "approved",
+        explanation: "Meets content guidelines",
+        evaluator: "human",
+      },
+    ];
+    await this.addAnnotations(spanId, span, humanEvals, "human");
+
+    return { content, spanId };
   }
 
   private async runAutomaticEvals(content: string, theme: string) {
-    const evalPromises = [
+    const [rel, qual, creat] = await Promise.all([
       this.evalRelevance(content, theme),
       this.evalQuality(content),
       this.evalCreativity(content),
-    ];
-
-    const results = await Promise.all(evalPromises);
-    return results.flat();
+    ]);
+    return [...rel, ...qual, ...creat];
   }
 
   private async evalRelevance(content: string, theme: string) {
@@ -79,7 +101,7 @@ class EvalAnnotator {
     return [
       {
         name: "content_quality",
-        score: score,
+        score,
         explanation:
           score > 0.7 ? "High quality content" : "Low quality content",
         evaluator: "model",
@@ -98,7 +120,6 @@ class EvalAnnotator {
   private async evalCreativity(content: string) {
     const uniqueWords = new Set(content.toLowerCase().split(/\s+/)).size;
     const creativityScore = Math.min(uniqueWords / 10, 1.0);
-
     return [
       {
         name: "creativity",
@@ -112,27 +133,73 @@ class EvalAnnotator {
     ];
   }
 
-  private addAnnotationsToSpan(span: any, annotations: any[]) {
-    const openInferenceAnnotations = annotations.map((annotation) => ({
-      name: annotation.name,
-      score: annotation.score,
-      label: annotation.label,
-      explanation: annotation.explanation,
-      metadata: annotation.metadata,
-    }));
+  private async addAnnotations(
+    spanId: string,
+    span: any,
+    annotations: any[],
+    kind: string
+  ) {
+    let apiFailed = false;
+    if (this.useApiAnnotations) {
+      for (const ann of annotations) {
+        const annotation: Annotation = {
+          name: ann.name,
+          label: ann.label,
+          score: ann.score,
+          explanation: ann.explanation,
+          identifier: `${ann.name}_${Date.now()}_${Math.random()
+            .toString(36)
+            .slice(2, 8)}`,
+          metadata: { ...ann.metadata, evaluator: ann.evaluator, kind },
+        };
 
-    span.setAttribute(
-      "openinference.annotations",
-      JSON.stringify(openInferenceAnnotations)
-    );
-  }
+        try {
+          await addSpanAnnotation({
+            client: phoenix,
+            spanAnnotation: { spanId, ...annotation },
+            sync: false,
+          });
+          console.log(
+            `API Added: ${annotation.name} = ${
+              annotation.score ?? annotation.label
+            }`
+          );
+        } catch (err: any) {
+          if (err.message.includes("404")) {
+            console.warn(
+              "API 404 detected — switching to attributes fallback."
+            );
+            this.useApiAnnotations = false;
+            apiFailed = true;
+            break;
+          } else {
+            console.error(`API Error for ${annotation.name}:`, err);
+          }
+        }
+      }
+    }
 
-  async addHumanEvaluation(spanId: string, humanEvals: any[]) {
-    console.log(`Adding human evaluations to span ${spanId}:`, humanEvals);
+    if (!this.useApiAnnotations || apiFailed) {
+      console.log("Using attributes fallback for annotations.");
+      for (const ann of annotations) {
+        const evalData = {
+          score: ann.score,
+          label: ann.label,
+          explanation: ann.explanation,
+          evaluator: ann.evaluator,
+          kind,
+          ...ann.metadata,
+        };
+        span.setAttribute(`eval.${ann.name}`, JSON.stringify(evalData));
+        console.log(
+          `Attribute Added: eval.${ann.name} = ${ann.score ?? ann.label}`
+        );
+      }
+    }
   }
 }
 
-async function runComprehensiveExample() {
+async function main() {
   const annotator = new EvalAnnotator();
 
   const testCases = [
@@ -146,50 +213,17 @@ async function runComprehensiveExample() {
     },
   ];
 
-  const results = await Promise.all(
-    testCases.map((testCase) =>
-      annotator.generateWithAutomaticEvals(testCase.theme, testCase.prompt)
-    )
+  for (const tc of testCases) {
+    const { content, spanId } = await annotator.generateAndEvaluate(
+      tc.theme,
+      tc.prompt
+    );
+    console.log(`\nSpan ${spanId}: ${tc.theme}\n${content}\n`);
+  }
+
+  console.log(
+    "All evals added. Check Phoenix UI: Datasets → comprehensive-evals (look for 'eval.*' columns or annotations)."
   );
-
-  console.log("=== COMPREHENSIVE EVALUATIONS ===");
-  results.forEach((result, index) => {
-    console.log(`\n--- Test Case ${index + 1} ---`);
-    console.log(`Theme: ${testCases[index].theme}`);
-    console.log(`Content: ${result?.content}`);
-    console.log("Automatic Evaluations:");
-    result?.autoEvals.forEach((evals: any) => {
-      if (evals.score !== undefined) {
-        console.log(
-          `  ✅ ${evals.name}: ${evals.score.toFixed(2)} - ${evals.explanation}`
-        );
-      } else {
-        console.log(
-          `  ✅ ${evals.name}: ${evals.label} - ${evals.explanation}`
-        );
-      }
-    });
-
-    const humanEvals = [
-      {
-        name: "human_quality_score",
-        score: 0.85,
-        explanation: "Good overall quality",
-        evaluator: "human",
-      },
-      {
-        name: "human_approval",
-        label: "approved",
-        explanation: "Meets content guidelines",
-        evaluator: "human",
-      },
-    ];
-    if (result) {
-      annotator.addHumanEvaluation(result.spanContext.spanId, humanEvals);
-    }
-  });
 }
 
-runComprehensiveExample().then(
-  () => new Promise((resolve) => setTimeout(resolve, 15000))
-);
+main().then(() => new Promise((r) => setTimeout(r, 15000)));
