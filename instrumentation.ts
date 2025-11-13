@@ -1,11 +1,20 @@
-import { register } from "@arizeai/phoenix-otel";
+import { register, registerInstrumentations } from "@arizeai/phoenix-otel";
+import OpenAI from "openai";
 import { OpenAIInstrumentation } from "@arizeai/openinference-instrumentation-openai";
 
-register({
+const provider = register({
   projectName: "openai-app",
-  instrumentations: [
-    new OpenAIInstrumentation(), 
-  ],
+  url: process.env.PHOENIX_COLLECTOR_ENDPOINT || "http://localhost:6006",
+  apiKey: process.env.PHOENIX_API_KEY || "",
+  batch: true,
 });
 
-console.log("OpenAI instrumentation registered");
+const instrumentation = new OpenAIInstrumentation();
+instrumentation.manuallyInstrument(OpenAI);
+
+registerInstrumentations({
+  instrumentations: [instrumentation],
+});
+
+instrumentation.setTracerProvider(provider);
+console.log("✅ OpenAI instrumentation registered");

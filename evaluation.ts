@@ -1,10 +1,10 @@
 import "./instrumentation.ts";
 import { createClassifierFn } from "@arizeai/phoenix-evals";
-import { openai } from "@ai-sdk/openai";
+import { openai as openAISDK } from "@ai-sdk/openai";
+import OpenAI from "openai";
 
 async function main() {
-  const model = openai("gpt-4o");
-
+  const model = openAISDK("gpt-4o");
   const promptTemplate = `
 In this task, you will be presented with a query, a reference text and an answer. The answer is
 generated to the question based on the reference text. The answer may contain false information. You
@@ -34,11 +34,30 @@ Is the answer above factual or hallucinated based on the query and reference tex
     promptTemplate: promptTemplate,
   });
 
+  const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+
+  const input = "What is the capital of France?";
+  const output = openai.chat.completions
+    .create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: input,
+        },
+      ],
+    })
+    .then((response) => {
+      return response.choices[0]?.message?.content ?? "";
+    });
+
   const result = await evaluator({
-    output: "Arize is not open source.",
-    input: "Is Arize Phoenix Open Source?",
+    output: await output,
+    input: input,
     reference:
-      "Arize Phoenix is a platform for building and deploying AI applications. It is open source.",
+      "France's capital city is Paris, known for its art, fashion, gastronomy, and culture.",
   });
 
   console.log("Evaluation Result:", result);
