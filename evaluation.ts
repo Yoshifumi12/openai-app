@@ -89,7 +89,7 @@ class EvalAnnotator {
       {
         name: "theme_relevance",
         score: Math.random() * 0.3 + 0.7,
-        explanation: `Content is relevant to theme: ${theme}`,
+        explanation: `${content} is relevant to theme: ${theme}`,
         evaluator: "model",
         metadata: { eval_type: "relevance" },
       },
@@ -220,10 +220,6 @@ async function main() {
     );
     console.log(`\nSpan ${spanId}: ${tc.theme}\n${content}\n`);
   }
-
-  console.log(
-    "All evals added. Check Phoenix UI: Datasets → comprehensive-evals (look for 'eval.*' columns or annotations)."
-  );
 }
 
 main().then(() => new Promise((r) => setTimeout(r, 15000)));
